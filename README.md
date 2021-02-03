@@ -4,8 +4,8 @@ This script uses the BleWinrtDll API to interact over BLE from Unity.
 
 # Using This Script in Unity
 1. Copy the BleWinrtDll assets into your project's list of assets:
-    * `BleWinrtDll Unity/Assets/BleApi.cs`
-    * `BleWinrtDll Unity/Assets/BleWinrtDll.dll`
+    * `BleWinrtDll/BleWinrtDll Unity/Assets/BleApi.cs`
+    * `BleWinrtDll/BleWinrtDll Unity/Assets/BleWinrtDll.dll`
 2. Copy the `TrueTouchBLE.cs` script into the list of assets
 3. Add the `TrueTouchBLE.cs` script to an appropriate element in your scene
     * E.g. create a new, empty GameObject and add the script to it
