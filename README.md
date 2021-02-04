@@ -18,3 +18,8 @@ This script uses the BleWinrtDll API to interact over BLE from Unity.
     * Connecting to the TrueTouch device is done automatically and robustly by an FSM that operates
       once per frame
 
+# Example Unity Scene
+An example Unity setup that can test the TrueTouch device is included in the `UnityBleTestGui` 
+directory. To open the project, select "Add" from the Unity Hub Projects tab and select the `UnityBleTestGui` 
+directory. 
+
