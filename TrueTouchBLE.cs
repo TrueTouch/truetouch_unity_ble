@@ -5,6 +5,10 @@ using System.Threading;
 using UnityEngine;
 
 public class TrueTouchBLE : MonoBehaviour {
+    /** Variable modifiable in the Unity environment or by setPulseDurationMs().
+     *  How many ms to pulse solenoids for */
+    public UInt32 SolenoidPulseDurationMs = 10;
+
     /** Fingers that can be updated */
     public enum Finger {
         THUMB,
@@ -17,12 +21,11 @@ public class TrueTouchBLE : MonoBehaviour {
 
     /** Types of updates for finger state */
     public enum UpdateType {
-        ACTUATE_SOLENOID,
-        RELEASE_SOLENOID,
+        PULSE_SOLENOID,
         SET_ERM
     }
 
-    private enum BleState {
+    public enum BleState {
         IDLE,
         SCANNING,
         CONNECTING,
@@ -31,8 +34,7 @@ public class TrueTouchBLE : MonoBehaviour {
     }
 
     private struct BleUpdate {
-        public BleApi.BLEData solenoidActuateData;
-        public BleApi.BLEData solenoidReleaseData;
+        public BleApi.BLEData solenoidPulseData;
         public List<BleApi.BLEData> ermSetData;
     }
 
@@ -70,8 +72,7 @@ public class TrueTouchBLE : MonoBehaviour {
     private bool isWritingBle = false;
 
     /** Updates to be sent out every frame */
-    private HashSet<Finger> actuateSolenoidUpdates = new HashSet<Finger>();
-    private HashSet<Finger> releaseSolenoidUpdates = new HashSet<Finger>();
+    private HashSet<Finger> solenoidsToPulse = new HashSet<Finger>();
     private Dictionary<byte, HashSet<Finger>> ermUpdates = new Dictionary<byte, HashSet<Finger>>();
 
     // Start is called before the first frame update
@@ -106,31 +107,41 @@ public class TrueTouchBLE : MonoBehaviour {
                 break;
         }
 
-        if ((actuateSolenoidUpdates.Count > 0 ||
-            releaseSolenoidUpdates.Count > 0 ||
-            ermUpdates.Count > 0) && !isWritingBle) {
+        if ((solenoidsToPulse.Count > 0 || ermUpdates.Count > 0) && !isWritingBle) {
             executeHandUpdate();
         }
+    }
+
+    public BleState GetState() {
+        return state;
+    }
+
+    public string GetConnectedDeviceName() {
+        if (state == BleState.CONNECTED) {
+            return truetouchDevice.name;
+        } else {
+            return "Disconnected";
+        }
+    }
+    
+    public string GetConnectedDeviceID() {
+        if (state == BleState.CONNECTED) {            
+            return truetouchDevice.id;
+        } else {
+            return "Disconnected";
+        }
+    }
+
+    public void SetPulseDurationMs(UInt32 pulseDuration) {
+        SolenoidPulseDurationMs = pulseDuration;
     }
 
     /** Queue an update to be sent to the remote device. All queued updates are formatted
      *  into a BLE message and sent at the start of each frame. */
     public void UpdateFinger(Finger finger, UpdateType type, byte pwm = 0) {
         switch (type) {
-            case UpdateType.ACTUATE_SOLENOID:
-                /* If this finger is queued to be released, negate that */
-                if (releaseSolenoidUpdates.Contains(finger)) {
-                    releaseSolenoidUpdates.Remove(finger);
-                }
-                actuateSolenoidUpdates.Add(finger);
-                break;
-
-            case UpdateType.RELEASE_SOLENOID:
-                /* If this finger is queued to be actuated, negate that */
-                if (actuateSolenoidUpdates.Contains(finger)) {
-                    actuateSolenoidUpdates.Remove(finger);
-                }
-                releaseSolenoidUpdates.Add(finger);
+            case UpdateType.PULSE_SOLENOID:
+                solenoidsToPulse.Add(finger);
                 break;
 
             case UpdateType.SET_ERM: {
@@ -244,75 +255,42 @@ public class TrueTouchBLE : MonoBehaviour {
         state = BleState.IDLE;
     }
 
-    private void bitsetToBytes(ref byte[] buffer, int startIdx, UInt32 bitset) {
-        buffer[startIdx + 0] = (byte)((bitset & 0xFF000000) >> 24);
-        buffer[startIdx + 1] = (byte)((bitset & 0x00FF0000) >> 16);
-        buffer[startIdx + 2] = (byte)((bitset & 0x0000FF00) >> 8);
-        buffer[startIdx + 3] = (byte)((bitset & 0x000000FF) >> 0);
+    private void uint32ToBytes(ref byte[] buffer, int startIdx, UInt32 value) {
+        buffer[startIdx + 0] = (byte)((value & 0xFF000000) >> 24);
+        buffer[startIdx + 1] = (byte)((value & 0x00FF0000) >> 16);
+        buffer[startIdx + 2] = (byte)((value & 0x0000FF00) >> 8);
+        buffer[startIdx + 3] = (byte)((value & 0x000000FF) >> 0);
     }
 
-    private BleApi.BLEData formatSolenoidActuate() {
+    private BleApi.BLEData formatSolenoidPulse() {
         BleApi.BLEData data = new BleApi.BLEData();
         data.size = 0;
 
         UInt32 solenoidFingerBitset = 0;
-        foreach (Finger finger in actuateSolenoidUpdates) {
+        foreach (Finger finger in solenoidsToPulse) {
             solenoidFingerBitset |= (1U << (int)finger);
         }
 
-        actuateSolenoidUpdates.Clear();
+        solenoidsToPulse.Clear();
 
         if (solenoidFingerBitset == 0) {
             return data;
         }
 
         data.buf = new byte[512];
-        data.size = 6;
+        data.size = 9;
         data.deviceId = truetouchDevice.id;
         data.serviceUuid = SERVICE_UUID;
         data.characteristicUuid = RX_CHAR_UUID;
 
-        /** TrueTouch protocol - solenoid write format:
+        /** TrueTouch protocol - solenoid pulse format:
          *      [1 byte]  Command
          *      [4 bytes] Finger bitset
-         *      [1 byte]  GpioOutput
+         *      [4 bytes] Duration (ms)
          */
-        data.buf[0] = (byte)TruetouchCommand.SOLENOID_WRITE;
-        bitsetToBytes(ref data.buf, 1, solenoidFingerBitset);
-        data.buf[5] = (byte)TruetouchGpioOutput.OUT_HIGH;
-
-        return data;
-    }
-
-    private BleApi.BLEData formatSolenoidRelease() {
-        BleApi.BLEData data = new BleApi.BLEData();
-        data.size = 0;
-
-        UInt32 solenoidFingerBitset = 0;
-        foreach (Finger finger in releaseSolenoidUpdates) {
-            solenoidFingerBitset |= (1U << (int)finger);
-        }
-
-        releaseSolenoidUpdates.Clear();
-
-        if (solenoidFingerBitset == 0) {
-            return data;
-        }
-
-        data.buf = new byte[512];
-        data.size = 6;
-        data.deviceId = truetouchDevice.id;
-        data.serviceUuid = SERVICE_UUID;
-        data.characteristicUuid = RX_CHAR_UUID;
-
-        /** TrueTouch protocol - solenoid write format:
-         *      [1 byte]  Command
-         *      [4 bytes] Finger bitset
-         *      [1 byte]  GpioOutput
-         */
-        data.buf[0] = (byte)TruetouchCommand.SOLENOID_WRITE;
-        bitsetToBytes(ref data.buf, 1, solenoidFingerBitset);
-        data.buf[5] = (byte)TruetouchGpioOutput.OUT_LOW;
+        data.buf[0] = (byte)TruetouchCommand.SOLENOID_PULSE;
+        uint32ToBytes(ref data.buf, 1, solenoidFingerBitset);
+        uint32ToBytes(ref data.buf, 1 + 4, SolenoidPulseDurationMs);
 
         return data;
     }
@@ -340,17 +318,8 @@ public class TrueTouchBLE : MonoBehaviour {
              *      [1 byte]  Intensity
              */
             data.buf[0] = (byte)TruetouchCommand.ERM_SET;
-            bitsetToBytes(ref data.buf, 1, ermFingerBitset);
+            uint32ToBytes(ref data.buf, 1, ermFingerBitset);
             data.buf[5] = entry.Key;
-
-            string dbg_str = "Sending: ";
-            for (int i = 0; i < data.size; ++i) {
-                dbg_str += data.buf[i].ToString("X2") + " ";
-                if (i % 17 == 16) {
-                    dbg_str += "\n\t";
-                }
-            }
-            Debug.Log(dbg_str);
 
             ermSetCommands.Add(data);
         }
@@ -364,19 +333,14 @@ public class TrueTouchBLE : MonoBehaviour {
         BleUpdate update;
         try {
             update = (BleUpdate)obj;
-        } catch (InvalidCastException) {
+        } catch (InvalidCastException) { // should never happen
             isWritingBle = false;
             return;
         }
 
         /* Send all the data in sequence, blocking each time */
-
-        if (update.solenoidActuateData.size > 0) {
-            BleApi.SendData(in update.solenoidActuateData, true);
-        }
-
-        if (update.solenoidReleaseData.size > 0) {
-            BleApi.SendData(in update.solenoidReleaseData, true);
+        if (update.solenoidPulseData.size > 0) {
+            BleApi.SendData(in update.solenoidPulseData, true);
         }
 
         if (update.ermSetData != null) {
@@ -392,9 +356,37 @@ public class TrueTouchBLE : MonoBehaviour {
         isWritingBle = true; // starting series of BLE writes
 
         BleUpdate update = new BleUpdate();
-        update.solenoidActuateData = formatSolenoidActuate();
-        update.solenoidReleaseData = formatSolenoidRelease();
+        update.solenoidPulseData = formatSolenoidPulse();
         update.ermSetData = formatErmSet();
+
+        string debugStr = "Sending ";
+        if (update.solenoidPulseData.size > 0) {
+            debugStr += "solenoid pulse: " + update.solenoidPulseData.size + " bytes:\n\t";
+            for (int i = 0; i < update.solenoidPulseData.size; ++i) {
+                debugStr += update.solenoidPulseData.buf[i].ToString("X2") + " ";
+                if (i % 17 == 16) {
+                    debugStr += "\n\t";
+                }
+            }
+            if (update.ermSetData.Count > 0) {
+                debugStr += "\n and ";
+            }
+        }
+
+        if (update.ermSetData.Count > 0) {
+            debugStr += update.ermSetData.Count + " ERM sets:";
+            foreach (BleApi.BLEData data in update.ermSetData) {
+                debugStr += "\n\t";
+                for (int i = 0; i < data.size; ++i) {
+                    debugStr += data.buf[i].ToString("X2") + " ";
+                    if (i % 17 == 16) {
+                        debugStr += "\n\t";
+                    }
+                }
+            }
+        }
+
+        Debug.Log(debugStr);
 
         var th = new Thread(sendBleMessages);
         th.Start(update);
