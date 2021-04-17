@@ -1,4 +1,7 @@
-﻿using System;
+﻿/* I have no idea how Unity/C# handles debugging, this might not make sense. */
+//#define BLE_BENCHMARK
+
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Threading;
@@ -8,6 +11,10 @@ public class TrueTouchBLE : MonoBehaviour {
     /** Variable modifiable in the Unity environment or by setPulseDurationMs().
      *  How many ms to pulse solenoids for */
     public UInt32 SolenoidPulseDurationMs = 10;
+
+    /** How often to push updates to the glove. Game must be stopped then restarted for updates
+     *  to take place. */
+    public float SendRateSeconds = 0.2f;
 
     /** Fingers that can be updated */
     public enum Finger {
@@ -75,12 +82,20 @@ public class TrueTouchBLE : MonoBehaviour {
     private HashSet<Finger> solenoidsToPulse = new HashSet<Finger>();
     private Dictionary<byte, HashSet<Finger>> ermUpdates = new Dictionary<byte, HashSet<Finger>>();
 
+#if BLE_BENCHMARK
+    /** Time previous message was sent. */
+    private DateTime previousSendTime;
+    private bool awaitingResponse = false;
+#endif
+
     // Start is called before the first frame update
     void Start() {
         /* Start scanning */
         BleApi.StartDeviceScan();
         state = BleState.SCANNING;
         Debug.Log("Scanning for devices");
+
+        InvokeRepeating("executeHandUpdate", SendRateSeconds, SendRateSeconds);
     }
 
     // Update is called once per frame
@@ -106,10 +121,6 @@ public class TrueTouchBLE : MonoBehaviour {
                 handleBleError();
                 break;
         }
-
-        if ((solenoidsToPulse.Count > 0 || ermUpdates.Count > 0) && !isWritingBle) {
-            executeHandUpdate();
-        }
     }
 
     public BleState GetState() {
@@ -123,9 +134,9 @@ public class TrueTouchBLE : MonoBehaviour {
             return "Disconnected";
         }
     }
-    
+
     public string GetConnectedDeviceID() {
-        if (state == BleState.CONNECTED) {            
+        if (state == BleState.CONNECTED) {
             return truetouchDevice.id;
         } else {
             return "Disconnected";
@@ -170,7 +181,7 @@ public class TrueTouchBLE : MonoBehaviour {
                         set.Add(finger);
                         ermUpdates.Add(pwm, set);
                     }
-                } 
+                }
                 break;
         }
     }
@@ -231,21 +242,23 @@ public class TrueTouchBLE : MonoBehaviour {
     }
 
     private void handleBleConnected() {
-        // we shouldn't ever get data anyways
+        /* If we get data it's likely ACKs for benchmarking. */
         BleApi.BLEData data = new BleApi.BLEData();
         while (BleApi.PollData(out data, false)) {
             string log_str = string.Format(
                 "Recieved from {0} | {1} | {2}\n\t{3} bytes:\n\t",
                 data.deviceId, data.serviceUuid, data.characteristicUuid, data.size
             );
-            for (int i = 0; i < data.size; ++i) {
-                log_str += data.buf[i].ToString("X2") + " ";
-                if (i % 17 == 16) {
-                    log_str += "\n\t";
-                }
-            }
-
             Debug.Log(log_str);
+
+            if (awaitingResponse) { /* Got response. */
+                awaitingResponse = false;
+                var now = DateTime.Now;
+                var timediff = now - previousSendTime;
+                Debug.Log(
+                    string.Format("Received ACK in {0} ms", timediff.TotalMilliseconds)
+                );
+            }
         }
     }
 
@@ -346,13 +359,29 @@ public class TrueTouchBLE : MonoBehaviour {
         if (update.ermSetData != null) {
             foreach (BleApi.BLEData data in update.ermSetData) {
                 BleApi.SendData(in data, true);
-            }   
+            }
         }
 
         isWritingBle = false;
     }
 
-    private void executeHandUpdate() {
+    void executeHandUpdate() {
+        /* Do nothing if already writing or if nothing to do */
+        if (!(solenoidsToPulse.Count > 0 || ermUpdates.Count > 0) || isWritingBle) {
+            return;
+        }
+
+        /* When debugging, throttle messages until we get an ACK */
+#if BLE_BENCHMARK
+        if (awaitingResponse) {
+            return;
+        }
+
+        /* Setup flag and timing for ACK measurement. */
+        previousSendTime = DateTime.Now;
+        awaitingResponse = true;
+#endif
+
         isWritingBle = true; // starting series of BLE writes
 
         BleUpdate update = new BleUpdate();
