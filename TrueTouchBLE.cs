@@ -251,6 +251,7 @@ public class TrueTouchBLE : MonoBehaviour {
             );
             Debug.Log(log_str);
 
+#if BLE_BENCHMARK
             if (awaitingResponse) { /* Got response. */
                 awaitingResponse = false;
                 var now = DateTime.Now;
@@ -259,6 +260,7 @@ public class TrueTouchBLE : MonoBehaviour {
                     string.Format("Received ACK in {0} ms", timediff.TotalMilliseconds)
                 );
             }
+#endif
         }
     }
 
